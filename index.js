@@ -1,9 +1,8 @@
 import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
-import axios from 'axios';
 import mongoose from 'mongoose';
-import OpenAI from 'openai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import { configDotenv } from 'dotenv';
 
 configDotenv(); // Load environment variables
@@ -16,11 +15,7 @@ const io = new Server(server);
 app.use(express.static('public'));
 
 // MongoDB Connection
-mongoose.connect('mongodb://127.0.0.1:27017/chatdb', {
-    // useNewUrlParser: true,
-    // useUnifiedTopology: true,
-    // serverSelectionTimeoutMS: 15000,
-})
+mongoose.connect('mongodb://127.0.0.1:27017/chatdb', {})
 .then(() => console.log('Connected to MongoDB'))
 .catch(err => console.error('MongoDB connection error:', err));
 
@@ -32,46 +27,39 @@ const messageSchema = new mongoose.Schema({
 });
 const Message = mongoose.model('Message', messageSchema);
 
-// Read OpenAI API Key from environment
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+// Read GEMINI API Key from environment
+const GEMINI_API_KEY = process.env.GEMINI;
 
-// Function to get response from OpenAI GPT model
+// Confirmation tracker
+let isAwaitingClearConfirmation = false;
 
-
-//OPENAI IMPORT
-const openai = new OpenAI({
-    apiKey : process.env.OPENAI_API_KEY,
-});
-
-//AXIOS IMPORT
-// const openai = new OpenAI();
+// Function to get response from Gemini  model
 
 async function getBotResponse(message) {
     try {
-        // const response = await axios.post(
-        const response = await openai.chat.completions.create(
-            // 'https://api.openai.com/v1/chat/completions',
-            {
-                // model: 'text-davinci-003',
-                
-                messages: [
-                    { role: "user", content: message }
-                    // { "role": "user", "content": message }
-                  ],
-                model: 'gpt-4o-mini',
-                // max_tokens: 250,
-            },
-            {
-                headers: {
-                    'Authorization': `Bearer ${OPENAI_API_KEY}`,
-                    'Content-Type': 'application/json',
-                }
+            if (message === '/clear' && !isAwaitingClearConfirmation) {
+                // Ask for confirmation to clear the messages
+                isAwaitingClearConfirmation = true;
+                return "Are you sure you want to clear all messages? Type '/yes' to confirm.";
+            } 
+            
+            else if (message === '/yes' && isAwaitingClearConfirmation){
+                // Clear all messages after confirmation
+                const deleteResult = await Message.deleteMany({});
+                console.log('Messages cleared:', deleteResult.deletedCount);
+                isAwaitingClearConfirmation = false;
+                return "All messages have been cleared.";
+            } 
+            
+            else {
+                const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+                const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+                const result = await model.generateContent(message)
+                return (result.response.text());
             }
-        );
-
-        return response.data.choices[0].text.trim();
+            
     } catch (error) {
-        console.error('Error fetching OpenAI response:', error);
+        console.error('Error fetching Gemini response:', error);
         return "Sorry, I'm having trouble understanding you right now.";
     }
 }
@@ -92,16 +80,21 @@ io.on('connection', async (socket) => {
     socket.on('userMessage', async (message) => {
         console.log('User message:', message);
 
-        // Save user message to MongoDB
-        const userMessage = new Message({ user: 'User', content: message });
-        await userMessage.save();
+       // Get bot response from Gemini API
+       const botResponse = await getBotResponse(message);
 
-        // Get bot response from OpenAI API
-        const botResponse = await getBotResponse(message);
+       if (message === '/clear') {
+            // Emit an event to clear the chat screen for the user
+            io.emit('clearScreen'); // Send this to client to clear the screen
+        } else {
+            // Save user message to MongoDB
+            const userMessage = new Message({ user: 'User', content: message });
+            await userMessage.save();
 
-        // Save bot response to MongoDB
-        const botMessage = new Message({ user: 'Bot', content: botResponse });
-        await botMessage.save();
+            // Save bot response to MongoDB
+            const botMessage = new Message({ user: 'Bot', content: botResponse });
+            await botMessage.save();
+        }
 
         // Emit bot response to the user
         socket.emit('botResponse', botResponse);
@@ -112,16 +105,7 @@ io.on('connection', async (socket) => {
     });
 });
 
-
 // Start the server
 server.listen(3000, () => {
     console.log('Server is running on http://localhost:3000');
 });
-
-    // socket.on('userMessage', (message) => {
-    //     console.log('User message:', message);
-
-    //     // Bot Reply
-    //     const botResponse = `Echo: ${message}`;
-    //     socket.emit('botResponse', botResponse);
-    // });
